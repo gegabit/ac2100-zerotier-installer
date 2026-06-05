@@ -9,6 +9,4 @@ script to install opkg and zerotier on ac2100 router with padavan rom
 ```bash
 wget -O /tmp/install.sh https://raw.githubusercontent.com/gegabit/ac2100-zerotier-installer/main/install.sh && sh /tmp/install.sh
 ```
-```bash
-curl -sL https://raw.githubusercontent.com/gegabit/ac2100-zerotier-installer/main/install.sh | sh
-```
+
