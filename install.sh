@@ -1,19 +1,12 @@
 #!/bin/sh
 # =============================================================================
 # Установщик ZeroTier для роутеров на прошивке Padavan
-# Версия: 1.0.1
+# Версия: 1.0.3
 # Автор: deepseek and gegabit
-# Описание: Автоматическая установка Entware и ZeroTier на Padavan (MT7621)
+# Описание: Установка Entware и ZeroTier на Padavan (MT7621)
 # =============================================================================
 
-# --- ФИКС ДЛЯ ЧТЕНИЯ ВВОДА ПРИ ЗАПУСКЕ ЧЕРЕЗ ПАЙП ---
-# Перенаправляем stdin с терминала, если скрипт запущен через curl ... | sh
-if [ ! -t 0 ]; then
-    exec </dev/tty
-fi
-# ----------------------------------------------------
-
-echo "=== Установка ZeroTier для Padavan v1.0.1 ==="
+echo "=== Установка ZeroTier для Padavan v1.0.3 ==="
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -30,7 +23,6 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
-log_question() { echo -e "${BLUE}[?]${NC} $1"; }
 
 # -----------------------------------------------------------------------------
 # Запрос ID сети ZeroTier
@@ -49,13 +41,12 @@ ask_network_id() {
         printf "${BLUE}[?]${NC} Введите ID сети: "
         read ZT_NETWORK_ID
         
-        # Проверка формата (16 символов, только hex)
         if echo "$ZT_NETWORK_ID" | grep -qE '^[a-fA-F0-9]{16}$'; then
             log_info "ID сети принят: $ZT_NETWORK_ID"
             break
         else
-            log_error "Неверный формат! ID сети должен содержать 16 HEX символов (0-9, a-f)"
-            echo "Пример: 743993888f16d5b7"
+            log_error "Неверный формат! Нужно 16 HEX символов (0-9, a-f)"
+            echo "Пример: 743993800f16d5b7"
             echo ""
         fi
     done
@@ -64,7 +55,6 @@ ask_network_id() {
     echo "Будет выполнено подключение к сети: $ZT_NETWORK_ID"
     echo ""
     
-    # Подтверждение
     while true; do
         printf "${BLUE}[?]${NC} Продолжить установку? (y/n): "
         read confirm
@@ -81,20 +71,20 @@ ask_network_id() {
 # -----------------------------------------------------------------------------
 get_rwfs_partition() {
     log_step "Поиск раздела RWFS..."
-    RWFS_DEV=$(cat /proc/mtd | grep "RWFS" | awk -F: '{print $1}' | sed 's/mtd//')
+    RWFS_LINE=$(cat /proc/mtd | grep "RWFS")
     
-    if [ -z "$RWFS_DEV" ]; then
+    if [ -z "$RWFS_LINE" ]; then
         log_error "Раздел RWFS не найден!"
-        log_error "Ваш роутер может не поддерживать установку Entware во внутреннюю память"
         exit 1
     fi
     
+    RWFS_DEV=$(echo "$RWFS_LINE" | awk -F: '{print $1}' | sed 's/mtd//')
     log_info "Найден раздел: /dev/mtd$RWFS_DEV"
     echo "$RWFS_DEV"
 }
 
 # -----------------------------------------------------------------------------
-# Монтирование /opt
+# Монтирование /opt (с правильным путём к устройству)
 # -----------------------------------------------------------------------------
 mount_opt() {
     local RWFS_DEV=$1
@@ -105,23 +95,30 @@ mount_opt() {
     fi
     
     log_step "Монтирование /opt..."
-    ubiattach -p "/dev/mtd$RWFS_DEV" 2>/dev/null
+    
+    # Приаттачиваем UBI (используем правильные имена)
+    ubiattach -m "$RWFS_DEV" 2>/dev/null
+    
+    # Проверяем, существует ли ubi0
+    if [ ! -e /dev/ubi0 ]; then
+        log_warn "UBI устройство не создано, форматируем..."
+        ubiformat "/dev/mtd$RWFS_DEV" -y 2>/dev/null
+        ubiattach -m "$RWFS_DEV" 2>/dev/null
+        ubimkvol /dev/ubi0 -N user -m 2>/dev/null
+    fi
+    
     mkdir -p /opt
     
     if mount -t ubifs ubi0 /opt 2>/dev/null; then
         log_info "/opt смонтирован успешно"
     else
-        log_warn "Первый запуск: форматирование RWFS..."
-        ubiformat "/dev/mtd$RWFS_DEV" -y
-        ubiattach -p "/dev/mtd$RWFS_DEV"
-        ubimkvol /dev/ubi0 -m -N user
-        mount -t ubifs ubi0 /opt
-        log_info "/opt создан и смонтирован"
+        log_error "Не удалось смонтировать /opt"
+        exit 1
     fi
 }
 
 # -----------------------------------------------------------------------------
-# Установка Entware
+# Установка Entware (с проверкой наличия wget/curl)
 # -----------------------------------------------------------------------------
 install_entware() {
     if [ -f /opt/bin/opkg ]; then
@@ -132,17 +129,24 @@ install_entware() {
     log_step "Установка Entware..."
     cd /tmp
     
+    # Пробуем скачать разными способами
     if command -v wget >/dev/null 2>&1; then
-        wget -q http://bin.entware.net/mipselsf-k3.4/installer/alternative.sh
+        wget http://bin.entware.net/mipselsf-k3.4/installer/alternative.sh
     elif command -v curl >/dev/null 2>&1; then
-        curl -s -O http://bin.entware.net/mipselsf-k3.4/installer/alternative.sh
+        curl -O http://bin.entware.net/mipselsf-k3.4/installer/alternative.sh
     else
-        log_error "Не найден wget или curl"
-        exit 1
+        # Если нет wget и curl, используем встроенный busybox wget
+        if busybox wget --help >/dev/null 2>&1; then
+            busybox wget http://bin.entware.net/mipselsf-k3.4/installer/alternative.sh
+        else
+            log_error "Не найден wget или curl!"
+            log_error "Установите wget: opkg install wget"
+            exit 1
+        fi
     fi
     
     chmod +x alternative.sh
-    ./alternative.sh
+    sh alternative.sh
     
     if [ -f /opt/bin/opkg ]; then
         log_info "Entware установлен успешно"
@@ -174,9 +178,111 @@ install_zerotier() {
 }
 
 # -----------------------------------------------------------------------------
-# Создание скриптов автозапуска (остаётся без изменений, слишком большой для вывода)
+# Создание скрипта автозапуска (упрощённая версия)
 # -----------------------------------------------------------------------------
-# ... (весь остальной код скрипта без изменений) ...
+create_startup_scripts() {
+    local ZT_NETWORK_ID=$1
+    local RWFS_DEV=$2
+    
+    log_step "Настройка автозапуска..."
+    
+    # Создаём скрипт автозапуска
+    cat > /etc/storage/started_script.sh << EOF
+#!/bin/sh
+# ZeroTier автозапуск
+
+# Монтирование Entware
+ubiattach -m $RWFS_DEV 2>/dev/null
+mount -t ubifs ubi0 /opt 2>/dev/null
+
+# Запуск ZeroTier
+if [ -f /opt/bin/zerotier-one ]; then
+    export PATH=/opt/bin:/opt/sbin:\$PATH
+    killall zerotier-one 2>/dev/null
+    sleep 2
+    /opt/bin/zerotier-one -d
+    sleep 10
+    /opt/bin/zerotier-cli join "$ZT_NETWORK_ID" 2>/dev/null
+fi
+EOF
+
+    chmod +x /etc/storage/started_script.sh
+    log_info "Скрипт автозапуска создан"
+}
+
+# -----------------------------------------------------------------------------
+# Запуск ZeroTier
+# -----------------------------------------------------------------------------
+start_zerotier() {
+    local ZT_NETWORK_ID=$1
+    
+    log_step "Запуск ZeroTier..."
+    
+    killall zerotier-one 2>/dev/null
+    sleep 2
+    
+    /opt/bin/zerotier-one -d
+    sleep 10
+    
+    /opt/bin/zerotier-cli join "$ZT_NETWORK_ID"
+    sleep 5
+    
+    # Получаем ID устройства
+    ZT_INFO=$(/opt/bin/zerotier-cli info 2>/dev/null)
+    ZT_NODE_ID=$(echo "$ZT_INFO" | awk '{print $3}')
+    
+    if [ -z "$ZT_NODE_ID" ] || [ "$ZT_NODE_ID" = "info" ]; then
+        ZT_NODE_ID=""
+    fi
+    
+    if [ -n "$ZT_NODE_ID" ]; then
+        log_info "ZeroTier запущен, ID устройства: $ZT_NODE_ID"
+    else
+        log_warn "ZeroTier запущен"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Сохранение конфигурации
+# -----------------------------------------------------------------------------
+save_config() {
+    log_step "Сохранение конфигурации..."
+    mtd_storage.sh save 2>/dev/null
+    log_info "Конфигурация сохранена"
+}
+
+# -----------------------------------------------------------------------------
+# Финальные инструкции
+# -----------------------------------------------------------------------------
+show_final_instructions() {
+    local ZT_NETWORK_ID=$1
+    local ZT_NODE_ID=$2
+    
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────┐"
+    echo "│                 УСТАНОВКА ЗАВЕРШЕНА                         │"
+    echo "└─────────────────────────────────────────────────────────────┘"
+    echo ""
+    echo "📋 ИНФОРМАЦИЯ:"
+    echo "   • ID вашей сети:     $ZT_NETWORK_ID"
+    if [ -n "$ZT_NODE_ID" ]; then
+        echo "   • ID устройства:     $ZT_NODE_ID"
+    fi
+    echo ""
+    echo "🔧 ПОЛЕЗНЫЕ КОМАНДЫ:"
+    echo "   • Проверить статус:  /opt/bin/zerotier-cli status"
+    echo "   • Список сетей:      /opt/bin/zerotier-cli listnetworks"
+    echo "   • Получить ID:       /opt/bin/zerotier-cli info"
+    echo ""
+    echo "➡️ СЛЕДУЮЩИЕ ШАГИ:"
+    echo "   1. Зайдите на https://my.zerotier.com"
+    echo "   2. Авторизуйте устройство в сети $ZT_NETWORK_ID"
+    echo "   3. Перезагрузите роутер: reboot"
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────┐"
+    echo "│  🎉 ZeroTier успешно установлен!                           │"
+    echo "└─────────────────────────────────────────────────────────────┘"
+}
 
 # -----------------------------------------------------------------------------
 # Главная функция
@@ -185,19 +291,17 @@ main() {
     echo ""
     echo "╔═════════════════════════════════════════════════════════════════╗"
     echo "║     Установка Entware + ZeroTier для роутеров на Padavan        ║"
-    echo "║                     Версия 1.0.1                                 ║"
+    echo "║                     Версия 1.0.3                                 ║"
     echo "╚═════════════════════════════════════════════════════════════════╝"
     echo ""
     
-    # Запрашиваем ID сети
     ask_network_id
     
-    # Установка
-    RWFS_NUM=$(get_rwfs_partition)
-    mount_opt "$RWFS_NUM"
+    RWFS_DEV=$(get_rwfs_partition)
+    mount_opt "$RWFS_DEV"
     install_entware
     install_zerotier
-    create_startup_scripts "$ZT_NETWORK_ID"
+    create_startup_scripts "$ZT_NETWORK_ID" "$RWFS_DEV"
     start_zerotier "$ZT_NETWORK_ID"
     save_config
     show_final_instructions "$ZT_NETWORK_ID" "$ZT_NODE_ID"
