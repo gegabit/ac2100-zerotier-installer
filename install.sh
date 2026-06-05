@@ -1,12 +1,12 @@
 #!/bin/sh
 # =============================================================================
 # Установщик ZeroTier для роутеров на прошивке Padavan
-# Версия: 1.0.3
+# Версия: 1.0.4
 # Автор: deepseek and gegabit
 # Описание: Установка Entware и ZeroTier на Padavan (MT7621)
 # =============================================================================
 
-echo "=== Установка ZeroTier для Padavan v1.0.3 ==="
+echo "=== Установка ZeroTier для Padavan v1.0.4 ==="
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -84,7 +84,7 @@ get_rwfs_partition() {
 }
 
 # -----------------------------------------------------------------------------
-# Монтирование /opt (с правильным путём к устройству)
+# Монтирование /opt (исправленная версия)
 # -----------------------------------------------------------------------------
 mount_opt() {
     local RWFS_DEV=$1
@@ -95,22 +95,41 @@ mount_opt() {
     fi
     
     log_step "Монтирование /opt..."
-    
-    # Приаттачиваем UBI (используем правильные имена)
-    ubiattach -m "$RWFS_DEV" 2>/dev/null
-    
-    # Проверяем, существует ли ubi0
-    if [ ! -e /dev/ubi0 ]; then
-        log_warn "UBI устройство не создано, форматируем..."
-        ubiformat "/dev/mtd$RWFS_DEV" -y 2>/dev/null
-        ubiattach -m "$RWFS_DEV" 2>/dev/null
-        ubimkvol /dev/ubi0 -N user -m 2>/dev/null
-    fi
-    
     mkdir -p /opt
     
-    if mount -t ubifs ubi0 /opt 2>/dev/null; then
-        log_info "/opt смонтирован успешно"
+    # Проверяем, существует ли уже ubi0
+    if [ -e /dev/ubi0 ]; then
+        # Пробуем смонтировать существующий
+        if mount -t ubifs ubi0 /opt 2>/dev/null; then
+            log_info "/opt смонтирован успешно"
+            return 0
+        fi
+    fi
+    
+    # Форматируем и создаём с нуля
+    log_warn "Форматирование RWFS (первый запуск)..."
+    
+    # Открепляем если было приаттачено
+    ubidetach -m "$RWFS_DEV" 2>/dev/null
+    
+    # Форматируем
+    ubiformat "/dev/mtd$RWFS_DEV" -y
+    
+    # Приаттачиваем
+    ubiattach -m "$RWFS_DEV"
+    
+    # Проверяем создался ли ubi0
+    if [ ! -e /dev/ubi0 ]; then
+        log_error "UBI устройство не создалось!"
+        exit 1
+    fi
+    
+    # Создаём том
+    ubimkvol /dev/ubi0 -N user -m
+    
+    # Монтируем
+    if mount -t ubifs ubi0 /opt; then
+        log_info "/opt создан и смонтирован успешно"
     else
         log_error "Не удалось смонтировать /opt"
         exit 1
@@ -140,7 +159,6 @@ install_entware() {
             busybox wget http://bin.entware.net/mipselsf-k3.4/installer/alternative.sh
         else
             log_error "Не найден wget или curl!"
-            log_error "Установите wget: opkg install wget"
             exit 1
         fi
     fi
@@ -178,7 +196,7 @@ install_zerotier() {
 }
 
 # -----------------------------------------------------------------------------
-# Создание скрипта автозапуска (упрощённая версия)
+# Создание скрипта автозапуска
 # -----------------------------------------------------------------------------
 create_startup_scripts() {
     local ZT_NETWORK_ID=$1
@@ -186,7 +204,6 @@ create_startup_scripts() {
     
     log_step "Настройка автозапуска..."
     
-    # Создаём скрипт автозапуска
     cat > /etc/storage/started_script.sh << EOF
 #!/bin/sh
 # ZeroTier автозапуск
@@ -227,18 +244,14 @@ start_zerotier() {
     /opt/bin/zerotier-cli join "$ZT_NETWORK_ID"
     sleep 5
     
-    # Получаем ID устройства
     ZT_INFO=$(/opt/bin/zerotier-cli info 2>/dev/null)
     ZT_NODE_ID=$(echo "$ZT_INFO" | awk '{print $3}')
     
-    if [ -z "$ZT_NODE_ID" ] || [ "$ZT_NODE_ID" = "info" ]; then
-        ZT_NODE_ID=""
-    fi
-    
-    if [ -n "$ZT_NODE_ID" ]; then
+    if [ -n "$ZT_NODE_ID" ] && [ "$ZT_NODE_ID" != "info" ]; then
         log_info "ZeroTier запущен, ID устройства: $ZT_NODE_ID"
     else
         log_warn "ZeroTier запущен"
+        ZT_NODE_ID=""
     fi
 }
 
@@ -277,7 +290,7 @@ show_final_instructions() {
     echo "➡️ СЛЕДУЮЩИЕ ШАГИ:"
     echo "   1. Зайдите на https://my.zerotier.com"
     echo "   2. Авторизуйте устройство в сети $ZT_NETWORK_ID"
-    echo "   3. Перезагрузите роутер: reboot"
+    echo "   3. Перезагрузите роутер для проверки: reboot"
     echo ""
     echo "┌─────────────────────────────────────────────────────────────┐"
     echo "│  🎉 ZeroTier успешно установлен!                           │"
@@ -291,7 +304,7 @@ main() {
     echo ""
     echo "╔═════════════════════════════════════════════════════════════════╗"
     echo "║     Установка Entware + ZeroTier для роутеров на Padavan        ║"
-    echo "║                     Версия 1.0.3                                 ║"
+    echo "║                     Версия 1.0.4                                 ║"
     echo "╚═════════════════════════════════════════════════════════════════╝"
     echo ""
     
