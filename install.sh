@@ -48,7 +48,7 @@ ask_network_id() {
             break
         else
             log_error "Неверный формат! ID сети должен содержать 16 HEX символов (0-9, a-f)"
-            echo "Пример: 743993800f16d5b7"
+            echo "Пример: 743993888f16d5b7"
             echo ""
         fi
     done
