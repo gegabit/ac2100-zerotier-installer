@@ -1,12 +1,12 @@
 #!/bin/sh
 # =============================================================================
 # Установщик ZeroTier для роутеров на прошивке Padavan
-# Версия: 1.0.4
-# Автор: deepseek and gegabit
-# Описание: Установка Entware и ZeroTier на Padavan (MT7621)
+# Версия: 1.0.5
+# Автор: gegabit
+# Описание: Автоматическая установка Entware и ZeroTier на Padavan (MT7621)
 # =============================================================================
 
-echo "==== Установка ZeroTier для Padavan v1.0.4 ===="
+echo "=== Установка ZeroTier для Padavan v1.0.5 ==="
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -33,8 +33,8 @@ ask_network_id() {
     echo "│                    НАСТРОЙКА ZEROTIER                       │"
     echo "└─────────────────────────────────────────────────────────────┘"
     echo ""
-    echo "Введите ID сети ZeroTier (формат: 16 символов, цифры и буквы)"
-    echo "Получить ID можно в вашем аккаунте на https://my.zerotier.com"
+    echo "Введите ID сети ZeroTier (16 HEX символов)"
+    echo "Получить ID: https://my.zerotier.com"
     echo ""
     
     while true; do
@@ -84,7 +84,7 @@ get_rwfs_partition() {
 }
 
 # -----------------------------------------------------------------------------
-# Монтирование /opt (исправленная версия)
+# Монтирование /opt
 # -----------------------------------------------------------------------------
 mount_opt() {
     local RWFS_DEV=$1
@@ -99,7 +99,6 @@ mount_opt() {
     
     # Проверяем, существует ли уже ubi0
     if [ -e /dev/ubi0 ]; then
-        # Пробуем смонтировать существующий
         if mount -t ubifs ubi0 /opt 2>/dev/null; then
             log_info "/opt смонтирован успешно"
             return 0
@@ -137,7 +136,7 @@ mount_opt() {
 }
 
 # -----------------------------------------------------------------------------
-# Установка Entware (с проверкой наличия wget/curl)
+# Установка Entware
 # -----------------------------------------------------------------------------
 install_entware() {
     if [ -f /opt/bin/opkg ]; then
@@ -154,7 +153,6 @@ install_entware() {
     elif command -v curl >/dev/null 2>&1; then
         curl -O http://bin.entware.net/mipselsf-k3.4/installer/alternative.sh
     else
-        # Если нет wget и curl, используем встроенный busybox wget
         if busybox wget --help >/dev/null 2>&1; then
             busybox wget http://bin.entware.net/mipselsf-k3.4/installer/alternative.sh
         else
@@ -196,7 +194,7 @@ install_zerotier() {
 }
 
 # -----------------------------------------------------------------------------
-# Создание скрипта автозапуска
+# Создание скриптов автозапуска
 # -----------------------------------------------------------------------------
 create_startup_scripts() {
     local ZT_NETWORK_ID=$1
@@ -204,10 +202,10 @@ create_startup_scripts() {
     
     log_step "Настройка автозапуска..."
     
-    cat > /etc/storage/started_script.sh << EOF
+    # Создаём скрипт для монтирования и запуска ZeroTier
+    cat > /etc/storage/zerotier_start.sh << EOF
 #!/bin/sh
 # ZeroTier автозапуск
-
 # Монтирование Entware
 ubiattach -m $RWFS_DEV 2>/dev/null
 mount -t ubifs ubi0 /opt 2>/dev/null
@@ -220,11 +218,29 @@ if [ -f /opt/bin/zerotier-one ]; then
     /opt/bin/zerotier-one -d
     sleep 10
     /opt/bin/zerotier-cli join "$ZT_NETWORK_ID" 2>/dev/null
+    logger -t "Zerotier" "ZeroTier запущен, подключён к сети $ZT_NETWORK_ID"
 fi
 EOF
-
-    chmod +x /etc/storage/started_script.sh
-    log_info "Скрипт автозапуска создан"
+    
+    chmod +x /etc/storage/zerotier_start.sh
+    
+    # Добавляем вызов в post_wan_script.sh (выполняется после поднятия WAN)
+    if ! grep -q "zerotier_start.sh" /etc/storage/post_wan_script.sh 2>/dev/null; then
+        echo "" >> /etc/storage/post_wan_script.sh
+        echo "# Запуск ZeroTier" >> /etc/storage/post_wan_script.sh
+        echo "/etc/storage/zerotier_start.sh &" >> /etc/storage/post_wan_script.sh
+        chmod +x /etc/storage/post_wan_script.sh
+    fi
+    
+    # Альтернативный вариант - добавляем в started_script.sh (на всякий случай)
+    if ! grep -q "zerotier_start.sh" /etc/storage/started_script.sh 2>/dev/null; then
+        echo "" >> /etc/storage/started_script.sh
+        echo "# Запуск ZeroTier" >> /etc/storage/started_script.sh
+        echo "/etc/storage/zerotier_start.sh &" >> /etc/storage/started_script.sh
+        chmod +x /etc/storage/started_script.sh
+    fi
+    
+    log_info "Скрипты автозапуска созданы"
 }
 
 # -----------------------------------------------------------------------------
@@ -235,15 +251,19 @@ start_zerotier() {
     
     log_step "Запуск ZeroTier..."
     
+    # Останавливаем старые процессы
     killall zerotier-one 2>/dev/null
     sleep 2
     
+    # Запускаем демон
     /opt/bin/zerotier-one -d
     sleep 10
     
+    # Подключаемся к сети
     /opt/bin/zerotier-cli join "$ZT_NETWORK_ID"
     sleep 5
     
+    # Получаем ID устройства
     ZT_INFO=$(/opt/bin/zerotier-cli info 2>/dev/null)
     ZT_NODE_ID=$(echo "$ZT_INFO" | awk '{print $3}')
     
@@ -289,8 +309,8 @@ show_final_instructions() {
     echo ""
     echo "➡️ СЛЕДУЮЩИЕ ШАГИ:"
     echo "   1. Зайдите на https://my.zerotier.com"
-    echo "   2. Авторизуйте устройство в сети $ZT_NETWORK_ID"
-    echo "   3. Перезагрузите роутер для проверки: reboot"
+    echo "   2. Авторизуйте устройство${ZT_NODE_ID:+ с ID $ZT_NODE_ID} в сети $ZT_NETWORK_ID"
+    echo "   3. Перезагрузите роутер: reboot"
     echo ""
     echo "┌─────────────────────────────────────────────────────────────┐"
     echo "│  🎉 ZeroTier успешно установлен!                           │"
@@ -304,7 +324,7 @@ main() {
     echo ""
     echo "╔═════════════════════════════════════════════════════════════════╗"
     echo "║     Установка Entware + ZeroTier для роутеров на Padavan        ║"
-    echo "║                     Версия 1.0.4                                 ║"
+    echo "║                     Версия 1.0.5                                 ║"
     echo "╚═════════════════════════════════════════════════════════════════╝"
     echo ""
     
